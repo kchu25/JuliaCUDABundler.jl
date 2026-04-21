@@ -179,28 +179,83 @@ not comments), variable names, function bodies, control flow.
 **Verdict**: removes *intent* (the "why" you wrote in comments). Does **not**
 remove the code itself. Casual reader sees uglier-but-still-readable code.
 
-#### (b) Patch `.ji` cache header to drop `srctext` records
+#### (b) Patch `.ji` cache header to drop source dependence  ← **`redact_source=true`**
 
-If you binary-edit the `.ji` to zero out the recorded source-hash table,
-`Base.stale_cachefile` skips the source check entirely. Then you can blank
-the `.jl` files to anything you want (as long as the module declaration
-remains for the loader to find it).
+Implemented. After precompile, walk every `.ji` in the private depot and
+**rewrite the recorded `(fsize, hash, mtime)` triple** for any include
+record whose filename points inside `app/src/`, replacing it with the
+signature of the *new* (stubbed/blank) file. Then recompute the trailing
+CRC32c so the `.ji` is still a valid cache. The `.so` is untouched, so
+its own CRC stays valid.
 
-**Status**: technically possible — the format is in `base/loading.jl`
-(`parse_cache_header`, `srctext_files`). Not implemented here because:
-- The `.ji` format changes between Julia point releases
-- You're shipping a bundle that depends on undocumented internals
-- A future `using` may regress badly if Julia adds new validation
+Result: the loader sees the source matches what it recorded, accepts the
+cache, `dlopen`s the `.so`, and runs your real native code — even though
+the `.jl` files now contain only `module MyApp end`.
 
-**Verdict**: works today; brittle to maintain. Worth it only if you have
-strong CI tied to a specific Julia version and you really need the `.jl`
-files gone.
+```julia
+bundle_app(BundleConfig(...; redact_source = true))
+```
+
+**Caveats — read these before turning it on**:
+
+- The `.ji` binary layout is **unstable** across Julia point releases. We
+  re-implement the relevant slice of `Base._parse_cache_header` and
+  `Base.read_module_list`. If Julia changes the layout (it has, twice
+  since 1.9), you must update `src/JiPatcher.jl`.
+- We refuse to run on unsupported versions (`is_supported()` check).
+  Currently supported: **1.10, 1.11, 1.12**.
+- `redact_source=true` implies a hard runtime dependence on the patched
+  `.ji`. If anything (e.g. a Julia patch upgrade on the deploy host) ever
+  invalidates the cache, the loader will fall back to the (now-blank)
+  `.jl` and your app will appear empty. Pin the deploy-side Julia
+  precisely. **Always ship via Docker** when using this option.
+- Method introspection still works: `methods(MyApp.f)` and
+  `Base.code_typed(MyApp.f, ...)` recover signatures and IR from the
+  `.so`. This option hides *source*, not *behavior*.
+
+**How to add support for a new Julia version** — the design is
+deliberately small so this is a 10-minute job:
+
+1. Read upstream `base/loading.jl` — find `_parse_cache_header` and
+   `read_module_list`.
+2. Diff against the version-1.12 reference comment at the top of
+   `src/JiPatcher.jl`.
+3. If only constants moved (e.g. one extra UInt8 of flags), update
+   `_scan_include_offsets` accordingly.
+4. If the structure of an include record changed (the `(depname, fsize,
+   hash, mtime, modpath)` tuple), branch on `VERSION` inside
+   `_scan_include_offsets`.
+5. Append the new `vX.Y` to `SUPPORTED_VERSIONS`.
+6. Run `julia --project=. test/runtests.jl` — the `redact_source` testset
+   will fail loudly if the layout is wrong (you'll get
+   `UndefVarError: julia_main` on the bundled launcher).
 
 #### (c) Run as a service, never ship code
 
 If your code is a genuine trade secret, **don't ship it**. Wrap it in an
 HTTP/gRPC server, host it, sell API access. This is the only approach that
 actually works against a determined adversary, regardless of language.
+
+### The bundled Julia runtime itself
+
+By default, the bundle includes the **entire Julia interpreter** (`bin/julia`,
+`lib/libjulia.so`, stdlib `.ji` files, etc.). This is ~500 MB and is *not*
+obfuscated — it's the standard Julia distribution.
+
+This actually *helps* your security posture:
+
+1. **Attacker gets Julia for free** — they don't have to install it. They're
+   already working with the same runtime you used to build.
+2. **No reverse-engineering the launcher** — the launcher is a trivial 10-line
+   bash script. Attacker doesn't need to reverse-engineer how to call Julia;
+   they can just use the included `bin/julia` directly.
+3. **Introspection tools are immediately available** — `methods()`,
+   `code_typed()`, REPL, debugger. The attacker can interactively probe
+   your loaded code. But they could do this with *any* Julia install.
+
+If you don't want Julia bundled (e.g., deploying to a container that already
+has it), set `bundle_julia=false`. Then the launcher assumes `julia` is in
+PATH. This saves ~500 MB but requires the target to have Julia installed.
 
 ### What no Julia distribution method protects against
 
@@ -210,6 +265,16 @@ A user with the bundle/image and `objdump`/`gdb`/`Base.code_typed` can:
 - Use `methods()` and `code_typed` introspection on loaded modules to
   recover Julia-level signatures and IR
 - Dump the `.ji` files with `Base.parse_cache_header` and friends
+- Launch the bundled `julia` REPL and load your module interactively
+
+The bundled Julia makes the last point **trivial** — they don't have to
+figure out how to invoke the launcher; they can just do:
+```bash
+cd /path/to/bundle
+export JULIA_DEPOT_PATH="$PWD/julia_depot:$HOME/.julia"
+export JULIA_LOAD_PATH="@:@stdlib"
+./julia/bin/julia -e 'using MyApp; methods(MyApp.f)' # see your function
+```
 
 `PackageCompiler.jl` sysimages share most of these vulnerabilities —
 they're not magic either.

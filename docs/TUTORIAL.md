@@ -276,6 +276,20 @@ Runs *before* precompile so cache hashes still align. Removes `# ...` and
 Does **not** remove docstrings or executable code — see `INTERNALS.md` §5
 for what this does and does not protect against.
 
+### Remove all `.jl` source from the bundle
+```julia
+BundleConfig(...; redact_source = true)
+```
+Precompiles normally, then **rewrites every `.jl` in `app/src/` to a stub**
+(your entry module becomes literally `module MyApp\nend`) and re-signs the
+`.ji` cache headers so Julia accepts the cache. The loader maps the `.so`
+package image and runs your real native code — but on-disk inspection
+shows no Julia source.
+
+Supported Julia versions: **1.10, 1.11, 1.12**. The bundler refuses to run
+on unsupported versions. See `INTERNALS.md` §5(b) for the full caveats and
+the per-version update procedure.
+
 ### Different CUDA version
 Edit `dockerfile_base`. The CUDA *runtime* in the image must match the
 runtime that `CUDA.jl` was precompiled against. Check with:

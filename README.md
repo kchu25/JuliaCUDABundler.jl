@@ -43,6 +43,9 @@ See `examples/CudaDemo` and `examples/FluxDemo` for working setups.
 - **[`docs/INTERNALS.md`](docs/INTERNALS.md)** — what's actually happening
   under the hood, why this works for CUDA when AOT doesn't, and an honest
   discussion of source opacity.
+- **[`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)** — architecture
+  mismatch, Julia version lock-in, CUDA driver issues, `redact_source`
+  caveats, and a quick-reference table of every common failure mode.
 
 ## Status
 
@@ -51,6 +54,10 @@ See `examples/CudaDemo` and `examples/FluxDemo` for working setups.
 - ✅ Docker image generation
 - ✅ `strip_comments=true` removes line/block comments before precompile
   (uses Julia's tokenizer; safe with strings)
+- ✅ `redact_source=true` rewrites `.jl` files to stubs and re-signs the
+  `.ji` cache headers, so the loader runs the `.so` package images with
+  no readable Julia source on disk (Julia 1.10 / 1.11 / 1.12 supported —
+  see `docs/INTERNALS.md` §5(b) for caveats)
 - ⚠️ `obfuscate_source = true` is experimental — Docker layer separation is
   the recommended opacity story
 - ⚠️ Bundles are arch-specific (build on the OS/CPU of the deployment target)

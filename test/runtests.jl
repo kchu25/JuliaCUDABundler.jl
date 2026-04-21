@@ -108,4 +108,46 @@ end
         out = read(`$(joinpath(OUT2, "bin", "CommApp"))`, String)
         @test occursin("# this # stays", out)
     end
+
+    @testset "redact_source removes logic but keeps bundle runnable" begin
+        APP3 = joinpath(TEST_DIR, "RedactApp")
+        OUT3 = joinpath(TEST_DIR, "redact_bundle")
+        mkpath(joinpath(APP3, "src"))
+        write(joinpath(APP3, "Project.toml"), """
+        name = "RedactApp"
+        uuid = "55555555-5555-5555-5555-555555555555"
+        version = "0.1.0"
+        """)
+        write(joinpath(APP3, "src", "RedactApp.jl"), """
+        module RedactApp
+        const PROPRIETARY_CONSTANT = 12345
+        function secret_algorithm(x)
+            return x * PROPRIETARY_CONSTANT + 7
+        end
+        function julia_main()::Cint
+            println("answer = ", secret_algorithm(3))
+            return 0
+        end
+        end
+        """)
+
+        bundle_app(BundleConfig(
+            project_dir   = APP3,
+            output_dir    = OUT3,
+            entry_module  = "RedactApp",
+            bundle_julia  = false,
+            redact_source = true,
+        ))
+
+        bundled = read(joinpath(OUT3, "app", "src", "RedactApp.jl"), String)
+        @test !occursin("PROPRIETARY_CONSTANT", bundled)
+        @test !occursin("12345", bundled)
+        @test !occursin("secret_algorithm", bundled)
+        @test occursin("module RedactApp", bundled)
+        @test occursin("Redacted", bundled)
+
+        # Bundle must still execute the (cached) original logic
+        out = read(`$(joinpath(OUT3, "bin", "RedactApp"))`, String)
+        @test occursin("answer = 37042", out)   # 3 * 12345 + 7
+    end
 end

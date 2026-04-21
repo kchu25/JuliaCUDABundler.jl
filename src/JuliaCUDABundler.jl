@@ -3,6 +3,9 @@ module JuliaCUDABundler
 using Pkg
 using Base.JuliaSyntax: tokenize, kind, untokenize, @K_str
 
+include("JiPatcher.jl")
+using .JiPatcher: patch_ji!, is_supported as ji_patcher_supported
+
 export bundle_app, BundleConfig
 
 """
@@ -25,6 +28,15 @@ Configuration for `bundle_app`.
   source, so the bundle still loads cleanly. Removes the *intent* (comments,
   docstrings) but the executable code remains readable. Uses Julia's own
   tokenizer so strings/char-literals containing `#` are preserved.
+- `redact_source::Bool = false` — **stronger source removal.** *After*
+  precompilation, replace every `.jl` file in the bundled `app/src/` with a
+  redacted stub (preserving only the top-level `module ... end` shell), and
+  then patch each `.ji` cache file to record the new (stub) `(fsize, hash,
+  mtime)` triple plus a recomputed trailing CRC32c. The result is a bundle
+  whose `.jl` files contain no logic but still loads cleanly because the
+  precompile cache validates against the stub. Requires `JiPatcher` to
+  support the running Julia version (currently 1.10–1.12). See
+  `INTERNALS.md` §5 for caveats.
 - `obfuscate_source::Bool = false` — EXPERIMENTAL. Replaces `.jl` files
   with stubs after precompilation. Currently only useful when combined with
   Docker distribution (Julia 1.12 still validates source hashes against the
@@ -43,6 +55,7 @@ Base.@kwdef struct BundleConfig
     entry_function::String = "julia_main"
     bundle_julia::Bool = true
     strip_comments::Bool = false
+    redact_source::Bool = false
     obfuscate_source::Bool = false
     juliaup_channel::String = ""
     dockerfile_base::String = "nvidia/cuda:13.0.0-runtime-ubuntu24.04"
@@ -92,6 +105,15 @@ function bundle_app(cfg::BundleConfig)
         _obfuscate_source!(app_dir, cfg.entry_module)
     else
         @info "[4/6] Source obfuscation disabled — .jl files left intact"
+    end
+
+    if cfg.redact_source
+        ji_patcher_supported() ||
+            error("redact_source=true requires Julia $(JiPatcher.SUPPORTED_VERSIONS); " *
+                  "running $VERSION. Disable redact_source or update JiPatcher.")
+        @info "      Redacting .jl source and re-signing .ji caches"
+        n_files, n_records = _redact_source!(app_dir, depot, cfg.entry_module)
+        @info "      Redacted $n_files file(s); patched $n_records .ji record(s)"
     end
 
     if cfg.bundle_julia
@@ -189,6 +211,62 @@ function _strip_jl_string(src::AbstractString)
     # Collapse runs of blank lines left by removed comments
     out = replace(out, r"\n[ \t]*\n[ \t]*\n+" => "\n\n")
     return out
+end
+
+"""
+Replace each `.jl` file in `<app_dir>/src/` with a redacted stub, then patch
+every `.ji` cache file in `<depot>/compiled/` so it accepts the new file
+content. Returns `(n_files_rewritten, n_ji_records_patched)`.
+
+The top-level module file becomes:
+    # Redacted by JuliaCUDABundler
+    module <ModName>
+    end
+Other (included) files become a single comment line. Both keep the file
+present (so the loader can stat them) and the module declaration intact (so
+`using <ModName>` resolves), while removing all human-readable logic.
+
+The actual code is loaded from the precompile cache (.ji + .so) under
+`<depot>/compiled/`. We rewrite the include records in each .ji so that
+`Base.any_includes_stale` is satisfied, then recompute the trailing
+whole-file CRC32c.
+"""
+function _redact_source!(app_dir::String, depot::String, entry_module::String)
+    src_dir = abspath(joinpath(app_dir, "src"))
+    isdir(src_dir) || return (0, 0)
+
+    # 1. Rewrite all .jl files in src_dir to redacted stubs
+    n_files = 0
+    for (root, _, files) in walkdir(src_dir), f in files
+        endswith(f, ".jl") || continue
+        path = joinpath(root, f)
+        if path == joinpath(src_dir, "$entry_module.jl")
+            stub = """
+                   # Redacted by JuliaCUDABundler — implementation in precompile cache
+                   module $entry_module
+                   end
+                   """
+        else
+            stub = "# Redacted by JuliaCUDABundler — implementation in precompile cache\n"
+        end
+        write(path, stub)
+        n_files += 1
+    end
+
+    # 2. Walk the depot and patch every .ji that references files under src_dir
+    n_records = 0
+    compiled = joinpath(depot, "compiled")
+    isdir(compiled) || return (n_files, 0)
+    for (root, _, files) in walkdir(compiled), f in files
+        endswith(f, ".ji") || continue
+        ji = joinpath(root, f)
+        try
+            n_records += patch_ji!(ji, src_dir)
+        catch e
+            @warn "Skipping .ji that could not be patched" path=ji exception=e
+        end
+    end
+    return (n_files, n_records)
 end
 
 """
