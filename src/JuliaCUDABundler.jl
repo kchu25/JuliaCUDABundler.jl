@@ -16,34 +16,46 @@ Configuration for `bundle_app`.
 # Required
 - `project_dir::String`  — absolute path to the Julia project to bundle.
 - `output_dir::String`   — absolute path where the bundle will be created.
-- `entry_module::String` — name of the top-level module (e.g. `"MyApp"`).
+- `entry_module::String` — the **package / module name** to load and run.
+  This must match **all three** of:
+  1. the `name` field in `Project.toml` (e.g. `name = "MyApp"`),
+  2. the `module MyApp … end` declaration in `src/MyApp.jl`, and
+  3. the name that Julia resolves when you do `using MyApp`.
+  It also becomes the name of the launcher binary written to `bin/` (so
+  `entry_module = "MyApp"` → `bin/MyApp`).
 
 # Optional
-- `entry_function::String = "julia_main"` — the function to call. Must have
-  signature `() -> Cint` and read `ARGS` for command-line arguments.
+- `entry_function::String = "julia_main"` — the **zero-argument function
+  inside `entry_module`** that serves as the program entry point. It must
+  return a `Cint` exit code and read `ARGS` for any command-line arguments.
+  The launcher calls `exit(MyApp.julia_main())` (substituting your module
+  and function names). Change this if your package uses a different name
+  (e.g. `entry_function = "run_app"`).
 - `bundle_julia::Bool   = true`  — copy the running Julia runtime into the
   bundle. Set to `false` if you require the target machine to have Julia.
-- `strip_comments::Bool = false` — strip line/block comments and docstrings
-  from `.jl` files **before** precompile. The cache hashes match the stripped
-  source, so the bundle still loads cleanly. Removes the *intent* (comments,
-  docstrings) but the executable code remains readable. Uses Julia's own
-  tokenizer so strings/char-literals containing `#` are preserved.
-- `redact_source::Bool = false` — **stronger source removal.** *After*
-  precompilation, replace every `.jl` file in the bundled `app/src/` with a
-  redacted stub (preserving only the top-level `module ... end` shell), and
-  then patch each `.ji` cache file to record the new (stub) `(fsize, hash,
-  mtime)` triple plus a recomputed trailing CRC32c. The result is a bundle
-  whose `.jl` files contain no logic but still loads cleanly because the
-  precompile cache validates against the stub. Requires `JiPatcher` to
-  support the running Julia version (currently 1.10–1.12). See
-  `INTERNALS.md` §5 for caveats.
-- `obfuscate_source::Bool = false` — EXPERIMENTAL. Replaces `.jl` files
-  with stubs after precompilation. Currently only useful when combined with
-  Docker distribution (Julia 1.12 still validates source hashes against the
-  precompile cache, so launching from a stripped bundle requires the cache
-  to be regenerated, which defeats the purpose). The recommended way to hide
-  source is to ship as a Docker image — source then lives in image layers
-  rather than as loose files. See `INTERNALS.md`.
+- `strip_comments::Bool = false` — strip line/block comments from `.jl`
+  files **before** precompile. The cache hashes match the stripped source,
+  so the bundle still loads cleanly. Removes comments/docstrings but
+  executable code remains readable. Uses Julia's own tokenizer so strings
+  or char-literals containing `#` are preserved. Combine with
+  `redact_source = true` for stronger removal.
+- `redact_source::Bool = false` — **recommended source-removal option.**
+  *After* precompilation, replaces every `.jl` file in `app/src/` with a
+  minimal stub (the top-level file keeps only `module MyApp\nend`; all
+  other files become a single comment line), then patches each `.ji` cache
+  file to accept the new stub hashes (recomputing the trailing CRC32c).
+  The bundle loads cleanly because real code is executed from the `.so`
+  package images in `julia_depot/compiled/` — on-disk inspection shows no
+  Julia logic. Requires Julia 1.10–1.12. See `INTERNALS.md` §5 for
+  caveats and the per-version update procedure.
+- `obfuscate_source::Bool = false` — **legacy / Docker-only.** Replaces
+  `.jl` files with stubs after precompilation but does *not* patch the
+  `.ji` cache headers. Julia's loader therefore detects a hash mismatch
+  and tries to recompile, producing an empty module — the bundle will not
+  run correctly as a standalone directory. Only use this option when
+  distributing as a Docker image (the image layers hide the stubs and the
+  cached `.so` files are already mapped). For all other cases prefer
+  `redact_source = true`.
 - `juliaup_channel::String = ""` — informational, recorded in metadata.
 - `dockerfile_base::String = "nvidia/cuda:13.0.0-runtime-ubuntu24.04"` — base
   image used in the auto-generated `Dockerfile`.

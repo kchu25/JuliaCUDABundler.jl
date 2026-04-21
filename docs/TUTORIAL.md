@@ -89,6 +89,40 @@ Two ready-made examples are in `examples/`:
 
 The whole API is one function and one struct:
 
+### `entry_module` and `entry_function` — what do they mean?
+
+`entry_module` is your **package name** — the string that appears in
+`Project.toml` as `name = "MyApp"`, matches the `module MyApp … end`
+declaration at the top of `src/MyApp.jl`, and is what you pass to
+`using MyApp`. It also becomes the name of the launcher executable
+(`bin/MyApp`).
+
+`entry_function` is a **zero-argument function inside that module** that
+acts as the program's entry point. It must return a `Cint` and read `ARGS`
+for command-line arguments. The launcher calls:
+
+```julia
+exit(MyApp.julia_main())   # substituting your module / function names
+```
+
+The default (`"julia_main"`) follows the `PackageCompiler.jl` / `juliac`
+convention — keep it unless you have a specific reason to rename it.
+
+### Full parameter reference
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project_dir` | `String` | *(required)* | Absolute path to the Julia project to bundle. |
+| `output_dir` | `String` | *(required)* | Absolute path where the bundle directory will be created (wiped and recreated each run). |
+| `entry_module` | `String` | *(required)* | Package / module name — must match `Project.toml` `name`, `module <Name>` in the source, and becomes the launcher binary name. |
+| `entry_function` | `String` | `"julia_main"` | Zero-arg, `Cint`-returning function inside `entry_module` that is called by the launcher. |
+| `bundle_julia` | `Bool` | `true` | Copy the running Julia runtime into `julia/`. Set to `false` to require Julia on the target. |
+| `strip_comments` | `Bool` | `false` | Strip `# …` and `#= … =#` comments from `.jl` files *before* precompile (cache hashes align with stripped source). |
+| `redact_source` | `Bool` | `false` | **Recommended source-removal option.** After precompile, rewrite all `.jl` files to empty stubs and patch `.ji` cache headers so the bundle still loads. Requires Julia 1.10–1.12. |
+| `obfuscate_source` | `Bool` | `false` | **Legacy / Docker-only.** Rewrites `.jl` files to stubs but does *not* patch `.ji` headers — the standalone bundle will not load correctly. Use `redact_source` instead unless you only ship Docker images. |
+| `juliaup_channel` | `String` | `""` | Informational; recorded in `BUNDLE_INFO.txt`. |
+| `dockerfile_base` | `String` | `"nvidia/cuda:13.0.0-runtime-ubuntu24.04"` | Base image for the auto-generated `Dockerfile`. |
+
 ```julia
 using JuliaCUDABundler
 
@@ -99,7 +133,9 @@ bundle_app(BundleConfig(
     # all optional:
     entry_function   = "julia_main",
     bundle_julia     = true,        # copy the running Julia runtime in
-    obfuscate_source = false,       # see INTERNALS.md (Docker is the real opacity)
+    strip_comments   = false,       # strip comments before precompile
+    redact_source    = false,       # rewrite .jl stubs + patch .ji headers
+    obfuscate_source = false,       # legacy Docker-only stub rewrite
     dockerfile_base  = "nvidia/cuda:13.0.0-runtime-ubuntu24.04",
 ))
 ```
