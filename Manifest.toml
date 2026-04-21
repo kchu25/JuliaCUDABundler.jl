@@ -1,0 +1,10 @@
+# This file is machine-generated - editing it directly is not advised
+
+julia_version = "1.12.2"
+manifest_format = "2.0"
+project_hash = "ce63c35cdbe4b46d5e8586b75eb134604077cd41"
+
+[[deps.JuliaCUDABundler]]
+path = "."
+uuid = "606e7c9c-adbb-4b0f-8202-17df37f38314"
+version = "1.0.0-DEV"
