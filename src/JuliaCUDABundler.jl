@@ -1,6 +1,7 @@
 module JuliaCUDABundler
 
 using Pkg
+using Base.JuliaSyntax: tokenize, kind, untokenize, @K_str
 
 export bundle_app, BundleConfig
 
@@ -19,6 +20,11 @@ Configuration for `bundle_app`.
   signature `() -> Cint` and read `ARGS` for command-line arguments.
 - `bundle_julia::Bool   = true`  — copy the running Julia runtime into the
   bundle. Set to `false` if you require the target machine to have Julia.
+- `strip_comments::Bool = false` — strip line/block comments and docstrings
+  from `.jl` files **before** precompile. The cache hashes match the stripped
+  source, so the bundle still loads cleanly. Removes the *intent* (comments,
+  docstrings) but the executable code remains readable. Uses Julia's own
+  tokenizer so strings/char-literals containing `#` are preserved.
 - `obfuscate_source::Bool = false` — EXPERIMENTAL. Replaces `.jl` files
   with stubs after precompilation. Currently only useful when combined with
   Docker distribution (Julia 1.12 still validates source hashes against the
@@ -36,6 +42,7 @@ Base.@kwdef struct BundleConfig
     entry_module::String
     entry_function::String = "julia_main"
     bundle_julia::Bool = true
+    strip_comments::Bool = false
     obfuscate_source::Bool = false
     juliaup_channel::String = ""
     dockerfile_base::String = "nvidia/cuda:13.0.0-runtime-ubuntu24.04"
@@ -70,6 +77,12 @@ function bundle_app(cfg::BundleConfig)
 
     @info "[2/6] Copying project" from=cfg.project_dir
     _copy_project(cfg.project_dir, app_dir)
+
+    if cfg.strip_comments
+        @info "       Stripping comments / docstrings (pre-precompile so hashes align)"
+        n = _strip_comments!(app_dir)
+        @info "       Stripped comment trivia from $n .jl file(s)"
+    end
 
     @info "[3/6] Precompiling into private depot (this can take a while)"
     _precompile_into_depot(app_dir, depot, cfg.entry_module)
@@ -135,12 +148,62 @@ function _precompile_into_depot(app_dir::String, depot::String, entry_module::St
 end
 
 """
+Strip comments and docstrings from every `.jl` file in `<app_dir>/src/`.
+
+Uses Julia's own tokenizer (`Base.JuliaSyntax`) so strings, char literals,
+and other constructs containing `#` are preserved correctly.
+
+Runs *before* precompile, so the cache's recorded source hashes match the
+stripped files and the loader is happy at runtime.
+"""
+function _strip_comments!(app_dir::String)
+    src_dir = joinpath(app_dir, "src")
+    isdir(src_dir) || return 0
+
+    n = 0
+    for (root, _, files) in walkdir(src_dir), f in files
+        endswith(f, ".jl") || continue
+        path = joinpath(root, f)
+        src  = read(path, String)
+        try
+            stripped = _strip_jl_string(src)
+            if stripped != src
+                write(path, stripped)
+                n += 1
+            end
+        catch e
+            @warn "Could not tokenize, leaving file untouched" path exception=e
+        end
+    end
+    return n
+end
+
+"""Tokenize Julia source and re-emit without `Comment` trivia."""
+function _strip_jl_string(src::AbstractString)
+    io = IOBuffer()
+    for tok in tokenize(src)
+        kind(tok) == K"Comment" && continue
+        write(io, untokenize(tok, src))
+    end
+    out = String(take!(io))
+    # Collapse runs of blank lines left by removed comments
+    out = replace(out, r"\n[ \t]*\n[ \t]*\n+" => "\n\n")
+    return out
+end
+
+"""
 Replace the bodies of `.jl` files in `app_dir/src/` with comment-only stubs.
 
 Julia's loader requires the module declaration to exist (the `module X ... end`
 shell), but the actual function definitions can live in the precompile cache.
 We rewrite each file as a hollow module so anyone reading the bundled source
 sees no logic.
+
+NOTE: Currently produces a non-runnable bundle on its own — Julia 1.12
+re-validates the cache against source hashes on `using`, sees the stub doesn't
+match, and tries to recompile (yielding an empty module). Useful only as a
+post-processing step inside Docker images where the bundle is never re-loaded
+without a corresponding regenerated cache.
 """
 function _obfuscate_source!(app_dir::String, entry_module::String)
     src_dir = joinpath(app_dir, "src")

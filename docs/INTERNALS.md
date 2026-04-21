@@ -112,56 +112,119 @@ outside the bundler's scope.
 
 ## 5. "Is the source actually hidden?"
 
-Honest answer: **partially, and Docker is doing most of the work.**
+This is the question that should keep you up at night if you're shipping
+proprietary code. Honest answer: **the bundle alone gives you no source
+opacity beyond what shipping `Project.toml + src/` would**. Docker is what
+makes inspection annoying. Below is the full picture.
 
-What's in the bundle:
+### What's in the bundle, in plain terms
 
-| Where the logic exists | Form | Human-readable? |
+| Artifact | Where it lives | Human-readable? |
 |---|---|---|
-| `app/src/MyApp.jl` | Plain Julia source | **Yes** |
-| `julia_depot/compiled/.../MyApp.ji` | Serialized typed IR (Julia's binary format) | No, but tools exist to dump it |
-| `julia_depot/compiled/.../MyApp.so` | Native machine code | No (you can disassemble it like any `.so`) |
+| Your Julia code | `app/src/*.jl` | **Yes** (plain text) |
+| Typed IR per dependency | `julia_depot/compiled/.../<hash>.ji` | No, but tools exist to dump it |
+| Native machine code per dependency | `julia_depot/compiled/.../<hash>.so` | No (disassemble like any `.so`) |
 
-When the launcher runs, the `.so` is what executes. The `.jl` is **read by
-Julia's loader for staleness checking** but its function bodies are not
-re-compiled. So you could argue the source is "vestigial" — but it's still
-sitting there as plain text.
+When the launcher runs, the `.so` is what executes. The `.jl` files are
+**only consulted by Julia's loader for staleness checking** — their function
+bodies are not re-parsed. The source is *vestigial at runtime*, but it's
+still there as text.
 
-### Why we don't strip the `.jl` files by default
+### Is bundle-in-Docker any better than source-in-Docker?
+
+For **opacity**, no — both ship the same `.jl` files inside OverlayFS layers.
+
+For **operations**, very different:
+
+| Property | source + Docker | **bundle + Docker** |
+|---|---|---|
+| First run wait | minutes (Pkg.precompile in container) | none |
+| Internet during deploy | yes (Pkg.add) | none |
+| Reproducible bytes | no (depends on registry state) | yes (frozen depot) |
+| Image size | ~3 GB (deps download + compile) | ~3 GB (already-compiled deps) |
+
+So the bundle's value over "source + Docker" is **operational**, not
+secrecy-related. That's the truthful framing.
+
+### Why we can't just delete the `.jl` files
 
 I tried. Julia 1.12's loader validates the cache against the source on
-*every* `using`. The check uses CRC32c hashes of source content and
-included-file lists. The flags `--compiled-modules=existing` and
-`--pkgimages=existing` change *what* Julia is willing to load, but they
-**don't** disable the staleness check. So if you blank out a `.jl` after
-precompiling, the next `using MyApp` sees the hash mismatch, decides the
-cache is stale, and either re-precompiles (giving you an empty module) or
-errors out.
+*every* `using`. The check uses size + CRC32c hash of source content,
+recorded in the `.ji` header at precompile time. Flags like
+`--compiled-modules=existing` and `--pkgimages=existing` only relax *which*
+caches Julia is willing to *use*; they **don't** disable the staleness
+check. Blank out a `.jl` after precompiling and the next `using MyApp` sees
+a hash mismatch, declares the cache stale, and either re-precompiles
+(yielding an empty module) or errors out.
 
-Hard-bypassing this would require patching the binary `.ji` header
-(rewriting the recorded source-hash table), which is brittle — every Julia
-point release can change the format. The `obfuscate_source = true` flag is
-left in as an experimental hook for people who want to try; the default is
-**off**.
+### What we *can* do, and the trade-offs
 
-### Where opacity actually comes from: Docker
+There are three real techniques on a spectrum of effort and reward:
 
-Once you `docker build`, the `app/`, `julia/`, and `julia_depot/`
-directories live as **OverlayFS layers inside the image**. From the
-recipient's perspective:
+#### (a) Strip comments before precompile  ← **`strip_comments=true`**
 
-- They run `docker run --gpus all myapp` and see only stdout/stderr.
-- They cannot trivially `cat /opt/app/src/MyApp.jl` — they would have to
-  start the container, exec into it, `apt install vim`, and dig.
-- A determined attacker can `docker save | tar xv` and pull every layer's
-  contents, including your `.jl`. There is no defense against that. **No
-  Julia distribution method protects against it**, including PackageCompiler
-  sysimages (sysimages can be partially reverse-engineered with `methods()`
-  introspection).
+Modify `.jl` files **before** the precompile step, so the recorded hashes
+match the stripped content. Implemented in this package using
+`Base.JuliaSyntax.tokenize`, which correctly handles strings, char
+literals, and block/line comments.
 
-The honest summary: **bundling does not protect source. Containerization
-makes casual inspection annoying. If your code is a trade secret, run it as
-a server and ship API access, not a container.**
+```julia
+bundle_app(BundleConfig(...; strip_comments = true))
+```
+
+**What it removes**: line comments (`# ...`), block comments (`#= ... =#`).
+**What it leaves**: docstrings (those are string literals attached to defs,
+not comments), variable names, function bodies, control flow.
+
+**Verdict**: removes *intent* (the "why" you wrote in comments). Does **not**
+remove the code itself. Casual reader sees uglier-but-still-readable code.
+
+#### (b) Patch `.ji` cache header to drop `srctext` records
+
+If you binary-edit the `.ji` to zero out the recorded source-hash table,
+`Base.stale_cachefile` skips the source check entirely. Then you can blank
+the `.jl` files to anything you want (as long as the module declaration
+remains for the loader to find it).
+
+**Status**: technically possible — the format is in `base/loading.jl`
+(`parse_cache_header`, `srctext_files`). Not implemented here because:
+- The `.ji` format changes between Julia point releases
+- You're shipping a bundle that depends on undocumented internals
+- A future `using` may regress badly if Julia adds new validation
+
+**Verdict**: works today; brittle to maintain. Worth it only if you have
+strong CI tied to a specific Julia version and you really need the `.jl`
+files gone.
+
+#### (c) Run as a service, never ship code
+
+If your code is a genuine trade secret, **don't ship it**. Wrap it in an
+HTTP/gRPC server, host it, sell API access. This is the only approach that
+actually works against a determined adversary, regardless of language.
+
+### What no Julia distribution method protects against
+
+A user with the bundle/image and `objdump`/`gdb`/`Base.code_typed` can:
+- Read `.jl` files (if present)
+- Disassemble `.so` package images
+- Use `methods()` and `code_typed` introspection on loaded modules to
+  recover Julia-level signatures and IR
+- Dump the `.ji` files with `Base.parse_cache_header` and friends
+
+`PackageCompiler.jl` sysimages share most of these vulnerabilities —
+they're not magic either.
+
+### Practical recommendation
+
+For most projects:
+1. Use `strip_comments = true` to remove intent-revealing comments.
+2. Distribute as a Docker image, not a raw folder.
+3. If your code is genuinely sensitive, host it as a service.
+
+If you must distribute readable executables of sensitive code, **Julia is
+the wrong tool** today. C++ with stripped binaries + control-flow
+flattening is closer to what you want, with all the productivity costs that
+implies.
 
 ---
 

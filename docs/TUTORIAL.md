@@ -267,6 +267,15 @@ docker run --rm --gpus all fluxdemo 100
   dockerfile_base = "nvidia/cuda:13.0.0-base-ubuntu24.04"
   ```
 
+### Strip comments / docstrings
+```julia
+BundleConfig(...; strip_comments = true)
+```
+Runs *before* precompile so cache hashes still align. Removes `# ...` and
+`#= ... =#`. Strings containing `#` are preserved (uses Julia's tokenizer).
+Does **not** remove docstrings or executable code — see `INTERNALS.md` §5
+for what this does and does not protect against.
+
 ### Different CUDA version
 Edit `dockerfile_base`. The CUDA *runtime* in the image must match the
 runtime that `CUDA.jl` was precompiled against. Check with:

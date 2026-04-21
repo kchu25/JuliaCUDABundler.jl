@@ -55,4 +55,57 @@ end
         @test occursin("hello from TinyApp", out)
         @test occursin("one", out) && occursin("two", out)
     end
+
+    @testset "_strip_jl_string preserves semantics" begin
+        f = JuliaCUDABundler._strip_jl_string
+        # comments removed
+        @test !occursin("comment", f("# a comment\nx = 1"))
+        # string contents preserved
+        s = f("""x = "# not a comment"\n# real comment""")
+        @test occursin("# not a comment", s)
+        @test !occursin("real comment", s)
+        # block comment removed
+        @test !occursin("inside", f("a #= inside =# b"))
+    end
+
+    @testset "strip_comments produces a runnable bundle" begin
+        APP2 = joinpath(TEST_DIR, "CommApp")
+        OUT2 = joinpath(TEST_DIR, "comm_bundle")
+        mkpath(joinpath(APP2, "src"))
+        write(joinpath(APP2, "Project.toml"), """
+        name = "CommApp"
+        uuid = "44444444-4444-4444-4444-444444444444"
+        version = "0.1.0"
+        """)
+        write(joinpath(APP2, "src", "CommApp.jl"), """
+        # SECRET ALGORITHM: do not share
+        module CommApp
+        # this comment should disappear
+        function julia_main()::Cint
+            x = "# this # stays"   # but this trailing one goes
+            println(x)
+            return 0
+        end
+        end
+        """)
+
+        bundle_app(BundleConfig(
+            project_dir    = APP2,
+            output_dir     = OUT2,
+            entry_module   = "CommApp",
+            bundle_julia   = false,
+            strip_comments = true,
+        ))
+
+        bundled_src = read(joinpath(OUT2, "app", "src", "CommApp.jl"), String)
+        @test !occursin("SECRET ALGORITHM", bundled_src)
+        @test !occursin("disappear", bundled_src)
+        @test !occursin("trailing one goes", bundled_src)
+        # string contents preserved
+        @test occursin("# this # stays", bundled_src)
+
+        # And the bundle still runs
+        out = read(`$(joinpath(OUT2, "bin", "CommApp"))`, String)
+        @test occursin("# this # stays", out)
+    end
 end

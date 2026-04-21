@@ -49,6 +49,8 @@ See `examples/CudaDemo` and `examples/FluxDemo` for working setups.
 - ✅ Pure CUDA.jl apps (verified on NVIDIA Grace Hopper / GB10, aarch64 Linux)
 - ✅ Flux.jl GPU training (verified end-to-end)
 - ✅ Docker image generation
+- ✅ `strip_comments=true` removes line/block comments before precompile
+  (uses Julia's tokenizer; safe with strings)
 - ⚠️ `obfuscate_source = true` is experimental — Docker layer separation is
   the recommended opacity story
 - ⚠️ Bundles are arch-specific (build on the OS/CPU of the deployment target)
