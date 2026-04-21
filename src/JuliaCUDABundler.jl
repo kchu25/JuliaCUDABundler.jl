@@ -169,6 +169,27 @@ function _precompile_into_depot(app_dir::String, depot::String, entry_module::St
         using Pkg
         Pkg.instantiate()
         Pkg.precompile()
+
+        # Force CUDA artifact download into the private depot.
+        # CUDA.jl downloads its runtime artifacts (libcuda stubs, PTX tools,
+        # cuDNN, etc.) lazily on first use — Pkg.precompile() alone does NOT
+        # trigger this. If the artifacts end up only in ~/.julia/artifacts/
+        # (the user depot) rather than in the bundle depot, the bundle works
+        # on the build machine but fails with "no GPU / CUDA not functional"
+        # on any other machine because the artifacts aren't present.
+        try
+            @eval using CUDA
+            @eval CUDA.precompile_runtime()   # downloads + caches artifacts here
+            @eval if CUDA.functional()
+                @info "CUDA functional" device=CUDA.name(CUDA.device())
+            else
+                @warn "CUDA not functional during precompile (no GPU on build machine?); " *
+                      "GPU artifacts may be missing from the bundle"
+            end
+        catch e
+            @warn "CUDA precompile_runtime() failed — GPU may not work in bundle" exception=e
+        end
+
         # Force-load the entry module so its package image is materialized
         try
             @eval using $entry_module
