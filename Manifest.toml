@@ -2,7 +2,7 @@
 
 julia_version = "1.12.2"
 manifest_format = "2.0"
-project_hash = "dde3b4b1102be7b74982605dd0d98b0b4339d38e"
+project_hash = "a62213bd30ac6574bd7589663da3740fefcd3ca9"
 
 [[deps.ArgTools]]
 uuid = "0dad84c5-d112-42e6-8d28-ef12dabb789f"
@@ -14,6 +14,10 @@ version = "1.11.0"
 
 [[deps.Base64]]
 uuid = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
+version = "1.11.0"
+
+[[deps.CRC32c]]
+uuid = "8bf52ea8-c179-5cab-976a-9e18b702a9bc"
 version = "1.11.0"
 
 [[deps.CompilerSupportLibraries_jll]]
@@ -36,7 +40,7 @@ uuid = "7b1f6079-737a-58dc-b8bc-7a2ca5c1b5ee"
 version = "1.11.0"
 
 [[deps.JuliaCUDABundler]]
-deps = ["Pkg", "SHA"]
+deps = ["CRC32c", "Pkg", "SHA"]
 path = "."
 uuid = "606e7c9c-adbb-4b0f-8202-17df37f38314"
 version = "0.1.0"

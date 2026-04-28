@@ -4,73 +4,101 @@
 [![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://kchu25.github.io/JuliaCUDABundler.jl/dev/)
 [![Build Status](https://github.com/kchu25/JuliaCUDABundler.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/kchu25/JuliaCUDABundler.jl/actions/workflows/CI.yml?query=branch%3Amain)
 
-> **Ship Julia + CUDA / Flux apps as a self-contained directory or Docker image, without `juliac` or `PackageCompiler.jl`.**
+> Ship a Julia + CUDA app as a folder you run, or a Docker image you `docker run`. No `juliac`, no `PackageCompiler.jl`, no LLVM crashes on Hopper / Blackwell GPUs.
 
-Julia's AOT compilers (`juliac`, `PackageCompiler.jl`) currently **cannot
-compile CUDA code** on modern NVIDIA hardware (Hopper, Blackwell). They
-crash with `LLVM ERROR: Cannot select intrinsic %llvm.nvvm.barrier.cluster.*`.
-
-`JuliaCUDABundler` sidesteps the problem by **shipping the precompile
-cache** (Julia 1.9+ package images, `.so` native code) along with the Julia
-runtime in a folder you can hand to anyone or wrap in Docker.
-
-## Quick start
+## Install
 
 ```julia
 using Pkg; Pkg.add(url="https://github.com/kchu25/JuliaCUDABundler.jl")
-using JuliaCUDABundler
+```
 
+## Bundle in 3 lines
+
+```julia
+using JuliaCUDABundler
 bundle_app(BundleConfig(
-    project_dir  = "/abs/path/to/MyApp",
-    output_dir   = "/abs/path/to/my_bundle",
-    entry_module = "MyApp",
+    project_dir  = "/abs/path/to/MyApp",   # your Julia package
+    output_dir   = "/abs/path/to/bundle",  # where the bundle is written
+    entry_module = "MyApp",                # the package's name
 ))
 ```
 
-```bash
-./my_bundle/bin/MyApp arg1 arg2          # run locally
-cd my_bundle && docker build -t myapp .  # ship as image
-docker run --rm --gpus all myapp arg1
+Your package needs **one function**, called `julia_main`:
+
+```julia
+module MyApp
+function julia_main()::Cint
+    # your code; read CLI args from ARGS
+    return 0
+end
+end
 ```
 
-Your app must define `julia_main()::Cint` (reads `ARGS`, returns exit code).
-See `examples/CudaDemo` and `examples/FluxDemo` for working setups.
+## Run it
 
-## Documentation
+```bash
+./bundle/bin/MyApp arg1 arg2
+```
 
-- **[`docs/TUTORIAL.md`](docs/TUTORIAL.md)** — full workflow, every command
-  explained, Docker process, troubleshooting.
-- **[`docs/INTERNALS.md`](docs/INTERNALS.md)** — what's actually happening
-  under the hood, why this works for CUDA when AOT doesn't, and an honest
-  discussion of source opacity.
-- **[`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)** — architecture
-  mismatch, Julia version lock-in, CUDA driver issues, `redact_source`
-  caveats, and a quick-reference table of every common failure mode.
+## Make a Docker image (the "binary")
+
+`bundle_app` already wrote a `Dockerfile` for you. Just:
+
+```bash
+cd bundle
+docker build -t myapp .
+docker run --rm --gpus all myapp arg1 arg2
+```
+
+The image carries your code, the Julia runtime, and CUDA artifacts — runs anywhere with Docker + NVIDIA drivers.
+
+## Working examples
+
+- [`examples/CudaDemo`](examples/CudaDemo) — minimal CUDA vector-add
+- [`examples/FluxDemo`](examples/FluxDemo) — Flux MLP training on GPU
+
+Try one end-to-end:
+
+```julia
+using JuliaCUDABundler
+bundle_app(BundleConfig(
+    project_dir  = joinpath(pkgdir(JuliaCUDABundler), "examples", "CudaDemo"),
+    output_dir   = "/tmp/cuda_demo_bundle",
+    entry_module = "CudaDemo",
+))
+```
+
+## Bundling a "glue" app (combining several local packages)
+
+If your app depends on packages that aren't in the General registry, point at them with `[sources]` in your `Project.toml`:
+
+```toml
+name = "MyGlueApp"
+uuid = "..."
+version = "0.1.0"
+
+[deps]
+BanzhafInference = "1dcd8bad-b4e2-4929-895b-5ffffc074544"
+EpicHyperSketch  = "c73a71ba-f77a-4450-b81e-a1166e41307d"
+
+[sources]
+BanzhafInference = { path = "/abs/path/to/BanzhafInference" }
+EpicHyperSketch  = { path = "/abs/path/to/EpicHyperSketch" }
+```
+
+`bundle_app` precompiles every dep into the bundle's private depot, so an N-package glue app still ships as a single folder.
+
+**Chains (`glue → inference → deep`) work too** — each package declares only its own immediate path-deps in its own `[sources]`; Pkg follows the chain. See [`detailed_README.md` §4.5](detailed_README.md#45-chained-path-deps-glue--inference--).
 
 ## Status
 
 - ✅ Pure CUDA.jl apps (verified on NVIDIA Grace Hopper / GB10, aarch64 Linux)
 - ✅ Flux.jl GPU training (verified end-to-end)
-- ✅ Docker image generation
-- ✅ `strip_comments=true` removes line/block comments before precompile
-  (uses Julia's tokenizer; safe with strings)
-- ✅ `redact_source=true` rewrites `.jl` files to stubs and re-signs the
-  `.ji` cache headers, so the loader runs the `.so` package images with
-  no readable Julia source on disk (Julia 1.10 / 1.11 / 1.12 supported —
-  see `docs/INTERNALS.md` §5(b) for caveats)
-- ⚠️ `obfuscate_source = true` is experimental — Docker layer separation is
-  the recommended opacity story
-- ⚠️ Bundles are arch-specific (build on the OS/CPU of the deployment target)
+- ✅ Docker image generation (auto-`Dockerfile`, NVIDIA CUDA base)
+- ✅ Multi-file projects, local path-deps, source redaction
+- ⚠️ Bundles are arch- and Julia-version-specific — build on the deploy target's OS/CPU
 
-## Why not `juliac` / `PackageCompiler.jl`?
+## Need more?
 
-| Feature | `juliac` / `PackageCompiler` | `JuliaCUDABundler` |
-|---|---|---|
-| CUDA on Hopper/Blackwell | ❌ broken | ✅ works |
-| Single binary | ✅ | ❌ folder + launcher |
-| Bundle size | ~200 MB | ~3 GB (with CUDA + Flux) |
-| Startup latency | ~50 ms | ~1–3 s (Julia init) |
-| Source obfuscation | ✅ | Docker layers (see INTERNALS) |
-
-Use `juliac` / `PackageCompiler.jl` for **pure CPU code**.
-Use this for **anything that touches the GPU**.
+- **[`detailed_README.md`](detailed_README.md)** — every `BundleConfig` option, how the bundle works inside, glue-app walkthrough, source-removal modes, gotchas.
+- Deeper dives: [`docs/TUTORIAL.md`](docs/TUTORIAL.md) · [`docs/INTERNALS.md`](docs/INTERNALS.md) · [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)
